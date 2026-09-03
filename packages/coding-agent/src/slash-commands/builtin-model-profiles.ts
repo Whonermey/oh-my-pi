@@ -6,7 +6,6 @@
  * profile. Profiles bundle role→model assignments, so switching affects only
  * models; runtime/session model picks keep precedence.
  */
-import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import type { Settings } from "../config/settings";
 import { ProfilePickerComponent } from "../modes/components/profile-picker";
 import type { InteractiveModeContext } from "../modes/types";
@@ -56,7 +55,6 @@ function handleModelProfileText(command: ParsedSlashCommand, settings: Settings,
 function showProfilePicker(runtime: { ctx: InteractiveModeContext }): void {
 	const ctx = runtime.ctx;
 	ctx.editor.setText("");
-	let overlayHandle: OverlayHandle | undefined;
 	let closed = false;
 	const done = () => {
 		if (closed) return;
@@ -77,7 +75,7 @@ function showProfilePicker(runtime: { ctx: InteractiveModeContext }): void {
 		},
 		onCancel: done,
 	});
-	overlayHandle = ctx.ui.showOverlay(picker, {
+	const overlayHandle = ctx.ui.showOverlay(picker, {
 		anchor: "bottom-center",
 		width: "100%",
 		maxHeight: "100%",

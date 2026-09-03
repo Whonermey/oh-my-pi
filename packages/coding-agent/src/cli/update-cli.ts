@@ -22,6 +22,7 @@ import {
 	unsupportedProxyMessage,
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
+import { runForkUpdateIfFork } from "./fork-update";
 
 const REPO = "can1357/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
@@ -1944,6 +1945,12 @@ export async function runUpdateCommand(opts: {
 	check: boolean;
 	channel?: UpdateChannel;
 }): Promise<void> {
+	// Fork builds (a `.fork` marker next to the executable) update from their
+	// own clone — merge upstream/main, rebuild from source, self-replace —
+	// instead of installing the official release.
+	if (await runForkUpdateIfFork(opts)) {
+		return;
+	}
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;
