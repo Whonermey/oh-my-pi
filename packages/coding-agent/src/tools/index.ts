@@ -603,7 +603,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
 		}
-		if (session.settings.get("memory.backend") === "mnemopi" && !requestedTools.includes("memory_edit")) {
+		if (
+			["mnemopi", "hindsight"].includes(session.settings.get("memory.backend") ?? "") &&
+			!requestedTools.includes("memory_edit")
+		) {
 			requestedTools.push("memory_edit");
 		}
 		if (externalThinkingActive && !requestedTools.includes("think")) {
@@ -668,7 +671,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}
-		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
+		if (name === "memory_edit") {
+			return ["mnemopi", "hindsight"].includes(session.settings.get("memory.backend") ?? "");
+		}
 		if (name === "manage_skill")
 			return (
 				session.settings.get("autolearn.enabled") &&

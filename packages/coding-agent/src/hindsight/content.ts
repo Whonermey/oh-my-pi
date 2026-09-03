@@ -20,6 +20,8 @@ export interface RecallResultLike {
 	text: string;
 	type?: string | null;
 	mentioned_at?: string | null;
+	/** Server-side memory id — rendered when callers need ids (recall tool output). */
+	id?: string;
 }
 
 const MEMORIES_REGEX = /<memories>[\s\S]*?<\/memories>/g;
@@ -63,13 +65,14 @@ export function hasSubstantiveContent(content: string): boolean {
 }
 
 /** Format recall results into a bullet list for context injection. */
-export function formatMemories(results: RecallResultLike[]): string {
+export function formatMemories(results: RecallResultLike[], options?: { includeIds?: boolean }): string {
 	if (results.length === 0) return "";
 	return results
 		.map(r => {
 			const typeStr = r.type ? ` [${r.type}]` : "";
 			const dateStr = r.mentioned_at ? ` (${r.mentioned_at})` : "";
-			return `- ${r.text}${typeStr}${dateStr}`;
+			const idLine = options?.includeIds && r.id ? `\n  id: ${r.id}` : "";
+			return `- ${r.text}${typeStr}${dateStr}${idLine}`;
 		})
 		.join("\n\n");
 }

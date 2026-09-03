@@ -83,7 +83,9 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 						useless: true,
 					};
 				}
-				const formatted = formatMemories(results);
+				// Ids make each result addressable by `read memory://<id>` and
+				// `memory_edit` — Hindsight recall results carry server ids.
+				const formatted = formatMemories(results, { includeIds: true });
 				return {
 					content: [
 						{

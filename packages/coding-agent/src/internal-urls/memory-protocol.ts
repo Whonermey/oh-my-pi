@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
+import type { HindsightApi } from "../hindsight/client";
 import { AgentRegistry } from "../registry/agent-registry";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
@@ -222,6 +223,56 @@ function mnemopiSessionStatesFromRegistry(): MnemopiSessionState[] {
 	return states;
 }
 
+/**
+ * Snapshot of live hindsight session states, deduplicated (subagents alias the
+ * parent state — keep the canonical primary per bank set).
+ */
+function hindsightSessionStatesFromRegistry(): Array<{ bankId: string; state: { client: HindsightApi } }> {
+	const seen = new Set<unknown>();
+	const states: Array<{ bankId: string; state: { client: HindsightApi } }> = [];
+	for (const ref of AgentRegistry.global().list()) {
+		const session = ref.session;
+		if (!session) continue;
+		const state = session.getHindsightSessionState?.();
+		if (!state) continue;
+		const primary = state.aliasOf ?? state;
+		if (seen.has(primary)) continue;
+		seen.add(primary);
+		states.push({ bankId: state.bankId, state });
+	}
+	return states;
+}
+/**
+ * Render a hindsight memory unit as text/markdown with a small YAML front
+ * matter header mirroring {@link renderMnemopiMemory}. Lets agents read the
+ * FULL content behind a clipped recall preview before `memory_edit update`.
+ */
+function renderHindsightMemory(url: InternalUrl, memory: Record<string, unknown>, bankId: string): InternalResource {
+	const str = (key: string): string => {
+		const value = memory[key];
+		return value === undefined || value === null ? "" : String(value);
+	};
+	const header =
+		"---\n" +
+		`id: ${str("id")}\n` +
+		`bank: ${bankId}\n` +
+		(memory.type ? `type: ${String(memory.type)}\n` : "") +
+		(str("context") ? `context: ${str("context")}\n` : "") +
+		(memory.curation_state ? `curation_state: ${String(memory.curation_state)}\n` : "") +
+		(str("occurred_start") ? `occurred_start: ${str("occurred_start")}\n` : "") +
+		(str("occurred_end") ? `occurred_end: ${str("occurred_end")}\n` : "") +
+		(str("mentioned_at") ? `mentioned_at: ${str("mentioned_at")}\n` : "") +
+		(Array.isArray(memory.tags) && memory.tags.length > 0 ? `tags: [${memory.tags.join(", ")}]\n` : "") +
+		"---\n\n";
+	const content = `${header}${str("text")}`;
+	return {
+		url: url.href,
+		content,
+		contentType: "text/markdown",
+		size: Buffer.byteLength(content, "utf-8"),
+		notes: [],
+	};
+}
 function memoryBackendFromContext(context?: ResolveContext): string | undefined {
 	if (!context?.settings || typeof context.settings !== "object") return undefined;
 	try {
@@ -306,26 +357,29 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
 			const mnemopiStates = mnemopiSessionStatesFromRegistry();
+			const hindsightStates = hindsightSessionStatesFromRegistry();
 			const hindsightActive =
 				backend === "hindsight" ||
-				(mnemopiStates.length === 0 &&
+				(hindsightStates.length > 0 &&
+					mnemopiStates.length === 0 &&
 					AgentRegistry.global()
 						.list()
 						.some(ref => ref.session?.getHindsightSessionState?.()));
-			if (hindsightActive) {
-				// Hindsight keeps memories server-side and exposes no
-				// `memory://<id>` addressing, yet the shared `recall` tool
-				// description still steers a follow-up `read memory://<id>`.
-				// Return a corrective pointer so that stray read self-corrects in
-				// one turn instead of derailing on the generic namespace error
-				// (issue #7587).
+			if (hindsightActive && hindsightStates.length > 0) {
+				// Hindsight memories live server-side, keyed by server memory id.
+				// This is the read counterpart to `memory_edit update`: agents
+				// inspect the FULL content behind a clipped recall preview before
+				// overwriting it (issue #7587).
+				const { bankId, state } = hindsightStates[0];
+				const memory = await state.client.getMemory(bankId, namespace);
+				if (memory) return renderHindsightMemory(url, memory, bankId);
 				throw new Error(
-					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
+					`Hindsight memory ${namespace} was not found in bank ${bankId}. Use \`recall\` to list available ids.`,
 				);
 			}
 			if (mnemopiStates.length === 0) {
 				throw new Error(
-					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,
+					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a memory id when memory.backend=mnemopi or hindsight is active.`,
 				);
 			}
 			const hit = tryResolveMnemopiMemory(namespace);

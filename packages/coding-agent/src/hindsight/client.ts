@@ -64,6 +64,30 @@ export interface ReflectResponse {
 	[key: string]: unknown;
 }
 
+/** Curation state for a single memory unit (soft retire / revert). */
+export type MemoryCurationState = "valid" | "invalidated";
+
+export interface MemoryCuration extends HindsightRequestOptions {
+	/** Replacement fact text. Re-embeds the memory, drops derived observations/links, triggers re-consolidation. */
+	text?: string;
+	/** Soft-retire ('invalidated') or restore ('valid') the memory. Invalidated memories are excluded from recall. */
+	state?: MemoryCurationState;
+	/** Optional free-text reason recorded when invalidating. */
+	reason?: string;
+}
+
+/** Single memory unit detail returned by GET/PATCH /memories/{memory_id}. */
+export interface MemoryUnitDetail {
+	id?: string;
+	text?: string;
+	type?: string | null;
+	context?: string | null;
+	mentioned_at?: string | null;
+	tags?: string[];
+	curation_state?: string | null;
+	[key: string]: unknown;
+}
+
 export interface RetainResponse {
 	[key: string]: unknown;
 }
@@ -349,6 +373,41 @@ export class HindsightApi {
 				},
 				signal: options?.signal,
 				timeoutMs: this.#reflectTimeoutMs,
+			},
+		);
+	}
+
+	/** Fetch a single memory unit by id (GET /memories/{memory_id}). Returns null on 404. */
+	async getMemory(
+		bankId: string,
+		memoryId: string,
+		options?: HindsightRequestOptions,
+	): Promise<MemoryUnitDetail | null> {
+		return this.#request<MemoryUnitDetail | null>(
+			"GET",
+			`/v1/default/banks/${encodeURIComponent(bankId)}/memories/${encodeURIComponent(memoryId)}`,
+			"getMemory",
+			{ allow404: true, signal: options?.signal },
+		);
+	}
+
+	/**
+	 * Curate a single memory unit (PATCH /memories/{memory_id}): correct its
+	 * text (re-embeds and re-consolidates) or soft-retire/restore it via
+	 * `state` — 'invalidated' memories are excluded from recall.
+	 */
+	async curateMemory(bankId: string, memoryId: string, curation: MemoryCuration): Promise<MemoryUnitDetail> {
+		return this.#request<MemoryUnitDetail>(
+			"PATCH",
+			`/v1/default/banks/${encodeURIComponent(bankId)}/memories/${encodeURIComponent(memoryId)}`,
+			"curateMemory",
+			{
+				body: {
+					text: curation.text,
+					state: curation.state,
+					reason: curation.reason,
+				},
+				signal: curation.signal,
 			},
 		);
 	}
