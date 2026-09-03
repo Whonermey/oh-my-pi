@@ -22,7 +22,19 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+
+/** `packages/utils/package.json` version of the merged tree (the reported `omp` version). */
+async function repoPackageVersion(repo: string): Promise<string> {
+	try {
+		const raw = await fs.promises.readFile(path.join(repo, "packages", "utils", "package.json"), "utf8");
+		const version = JSON.parse(raw).version;
+		return typeof version === "string" ? version : VERSION;
+	} catch {
+		return VERSION;
+	}
+}
 
 export interface ForkMarker {
 	repo: string;
@@ -142,7 +154,22 @@ export async function runForkUpdateIfFork(options: { force: boolean; check: bool
 			return true;
 		}
 
-		console.log(chalk.dim("Rebuilding…"));
+		const repoVersion = await repoPackageVersion(repo);
+		// The natives addon embeds a version sentinel and is never bundled into
+		// the binary, so an upstream version bump must rebuild it first —
+		// otherwise the new loader refuses the stale addon next to the exe.
+		if (repoVersion !== VERSION) {
+			console.log(chalk.dim(`Rebuilding native addon for ${repoVersion}…`));
+			const nativesExit = await runForeground("bun", ["--cwd=packages/natives", "run", "build"], repo);
+			if (nativesExit !== 0) {
+				console.error(chalk.red("Native addon build failed."));
+				process.exitCode = 1;
+				return true;
+			}
+		} else {
+			console.log(chalk.dim(`Native addon already current (${VERSION}).`));
+		}
+		console.log(chalk.dim("Rebuilding binary…"));
 		const buildExit = await runForeground("bun", ["--cwd=packages/coding-agent", "run", "build"], repo);
 		if (buildExit !== 0) {
 			console.error(chalk.red("Source build failed."));
@@ -151,6 +178,7 @@ export async function runForkUpdateIfFork(options: { force: boolean; check: bool
 		}
 
 		await replaceRunningBinary(repo);
+		await refreshNativeAddon(repo);
 		console.log(
 			chalk.green(`${"✔"} Updated. Restart omp to run the new build (current session keeps the old code).`),
 		);
@@ -191,5 +219,18 @@ async function replaceRunningBinary(repo: string): Promise<void> {
 		fs.unlinkSync(backupPath);
 	} catch {
 		// Leftover cleanup happens on the next successful update.
+	}
+}
+
+/** Copy the freshly built native addon next to the replaced executable. */
+function refreshNativeAddon(repo: string): void {
+	const addon = path.join(repo, "packages", "natives", "native", "pi_natives.win32-x64-modern.node");
+	if (process.platform !== "win32" || !fs.existsSync(addon)) return;
+	const target = path.join(path.dirname(process.execPath), "pi_natives.win32-x64-modern.node");
+	try {
+		fs.copyFileSync(addon, target);
+	} catch {
+		// A stale addon here only affects the next natives-dependent command;
+		// the update itself has already succeeded.
 	}
 }
