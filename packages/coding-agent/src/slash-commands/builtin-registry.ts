@@ -11,6 +11,7 @@ import {
 import { BUILTIN_CONTROL_SLASH_COMMANDS } from "./builtin-control";
 import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "./builtin-lifecycle";
 import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./builtin-marketplace";
+import { BUILTIN_MODEL_PROFILE_SLASH_COMMANDS } from "./builtin-model-profiles";
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
 import { parseSlashCommand } from "./helpers/parse";
@@ -40,6 +41,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_SESSION_SLASH_COMMANDS,
 	...BUILTIN_LIFECYCLE_SLASH_COMMANDS,
 	...BUILTIN_MARKETPLACE_SLASH_COMMANDS,
+	...BUILTIN_MODEL_PROFILE_SLASH_COMMANDS,
 	...BUILTIN_CONTROL_SLASH_COMMANDS,
 ];
 
@@ -80,6 +82,18 @@ function materializeTuiBuiltinSlashCommand(
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
+		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+	} else if (cmd.name === "model_profile" && runtime) {
+		// Live profile-name completions: saved profiles plus the `none`
+		// deactivation alias.
+		const profiles = runtime.ctx.settings.getModelProfiles();
+		materialized.getArgumentCompletions = buildArgumentCompletions([
+			...Object.keys(profiles).map(name => ({
+				name,
+				description: `${Object.keys(profiles[name] ?? {}).length} role${Object.keys(profiles[name] ?? {}).length === 1 ? "" : "s"}`,
+			})),
+			{ name: "none", description: "Deactivate the active profile (base roles)" },
+		]);
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	} else if (cmd.inlineHint) {
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);

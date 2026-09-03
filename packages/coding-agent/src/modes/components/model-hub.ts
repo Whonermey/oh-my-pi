@@ -61,6 +61,12 @@ type RolesRow =
 	| { kind: "newRole" };
 
 /**
+ * A row of the Profiles view: the "no profile" row, one saved profile, or the
+ * trailing "+ New profile…" row.
+ */
+type ProfilesRow = { kind: "none" } | { kind: "profile"; name: string } | { kind: "newProfile" };
+
+/**
  * What the model browser is currently picking for: a role's model, a slot in
  * a fallback chain (`role` may be a role name, model selector, or `provider/*`
  * key), or the primary model a brand-new fallback chain protects.
@@ -105,7 +111,7 @@ export interface ModelHubOptions {
 
 interface SidebarEntry {
 	id: string;
-	kind: "recent" | "roles" | "all" | "separator" | "provider";
+	kind: "recent" | "roles" | "profiles" | "all" | "separator" | "provider";
 	label: string;
 	providerId?: string;
 	locked?: boolean;
@@ -140,6 +146,13 @@ type StripState =
 			/** Footer text input naming a new custom role. */
 			kind: "roleName";
 			input: Input;
+	  }
+	| {
+			/** Footer text input naming a model profile (create or rename). */
+			kind: "profileName";
+			input: Input;
+			/** When set, the profile being renamed; otherwise a new profile. */
+			renameFrom?: string;
 	  };
 
 /** Recorded chip hit-range on the footer row (columns relative to frame col 0). */
@@ -212,6 +225,14 @@ export class ModelHubComponent implements Component {
 	/** Roles rows actually drawn this frame; bounds mouse hit-testing to the visible window. */
 	#rolesVisibleCount = 0;
 
+	#profileRows: ProfilesRow[] = [];
+	#profileIndex = 0;
+	#profileHover: number | null = null;
+	/** First profiles row drawn in the scroll window; follows the cursor and clamps to the list. */
+	#profileScrollStart = 0;
+	/** Profiles rows actually drawn this frame; bounds mouse hit-testing to the visible window. */
+	#profilesVisibleCount = 0;
+
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
 	/** Per-provider fuzzy match counts while a query is active; null when not searching. */
@@ -231,6 +252,7 @@ export class ModelHubComponent implements Component {
 	#chipRanges: ChipRange[] = [];
 	#lockedLoginLine: number | null = null;
 	#rolesRowStart = 1;
+	#profilesRowStart = 1;
 
 	constructor(
 		tui: TUI,
@@ -328,6 +350,7 @@ export class ModelHubComponent implements Component {
 
 		this.#reloadRoles(availableModels);
 		this.#buildRolesRows();
+		this.#buildProfileRows();
 
 		const storage = this.#settings.getStorage();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];
@@ -420,9 +443,22 @@ export class ModelHubComponent implements Component {
 			if (assignment && !assignment.autoSelected) assignedCount++;
 		}
 
-		// Roles leads the fixed section so downward hops from Recent head into
-		// model scopes instead of being captured by the roles view.
+		// Profiles leads the fixed section (above Roles): named role-assignment
+		// bundles. Its annotation shows the active profile name, or the saved
+		// profile count when none is active.
+		const activeProfile = this.#settings.getActiveModelProfile();
+		const profileCount = Object.keys(this.#settings.getModelProfiles()).length;
 		const fixed: SidebarEntry[] = [
+			{
+				id: "profiles",
+				kind: "profiles",
+				label: "Profiles",
+				annotation: activeProfile
+					? `${theme.status.enabled} ${activeProfile}`
+					: profileCount > 0
+						? String(profileCount)
+						: "off",
+			},
 			{
 				id: "roles",
 				kind: "roles",
@@ -518,6 +554,9 @@ export class ModelHubComponent implements Component {
 			case "roles":
 				this.#roleIndex = Math.min(this.#roleIndex, Math.max(0, this.#rolesRowCount - 1));
 				break;
+			case "profiles":
+				this.#profileIndex = Math.min(this.#profileIndex, Math.max(0, this.#profileRows.length - 1));
+				break;
 			default:
 				this.#browser.setShowProvider(true);
 				this.#browser.setItems([...this.#availableItems]);
@@ -577,6 +616,17 @@ export class ModelHubComponent implements Component {
 		this.#rolesRows = rows;
 	}
 
+	/** Rebuild the Profiles view rows: the "no profile" row, each saved profile, then "+ New profile…". */
+	#buildProfileRows(): void {
+		const rows: ProfilesRow[] = [{ kind: "none" }];
+		for (const name of Object.keys(this.#settings.getModelProfiles())) {
+			rows.push({ kind: "profile", name });
+		}
+		rows.push({ kind: "newProfile" });
+		this.#profileRows = rows;
+		this.#profileIndex = Math.min(this.#profileIndex, Math.max(0, rows.length - 1));
+	}
+
 	/** Refresh roles + dependent state after a settings mutation (assign/unassign). */
 	#refreshAfterMutation(): void {
 		this.#syncFromRegistryState();
@@ -631,7 +681,7 @@ export class ModelHubComponent implements Component {
 	#isHopSkipped(entry: SidebarEntry): boolean {
 		if (entry.kind === "separator") return true;
 		if (!this.#searchCounts) return false;
-		if (entry.kind === "roles") return true;
+		if (entry.kind === "roles" || entry.kind === "profiles") return true;
 		if (entry.kind === "recent") return this.#recentSearchCount === 0;
 		if (entry.kind === "provider") {
 			if (entry.locked) return true;
@@ -798,7 +848,13 @@ export class ModelHubComponent implements Component {
 
 	/** Persist `role → item`, preserving a still-supported thinking level, then open the thinking strip. */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
-		if (this.#settings.get("modelRoleStorage") === "project" && scope === undefined) {
+		// With a profile active, assignments land in the profile regardless of
+		// storage scope, so the project/global scope strip would be inert.
+		if (
+			this.#settings.get("modelRoleStorage") === "project" &&
+			scope === undefined &&
+			!this.#settings.getActiveModelProfile()
+		) {
 			this.#openScopeStrip(item, role, returnToRoles);
 			return;
 		}
@@ -932,7 +988,7 @@ export class ModelHubComponent implements Component {
 
 	#activateStripChip(): void {
 		const strip = this.#strip;
-		if (!strip || strip.kind === "roleName") return;
+		if (!strip || strip.kind === "roleName" || strip.kind === "profileName") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
 		switch (chip.action) {
@@ -1185,6 +1241,7 @@ export class ModelHubComponent implements Component {
 
 		const entry = this.#activeEntry();
 		const rolesView = entry.kind === "roles" && this.#assigning === null;
+		const profilesView = entry.kind === "profiles" && this.#assigning === null;
 		const lockedView = entry.kind === "provider" && entry.locked && this.#assigning === null;
 
 		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
@@ -1206,7 +1263,7 @@ export class ModelHubComponent implements Component {
 		}
 		if (matchesKey(data, "right")) {
 			// Only views with rows can take list focus (not the locked pane).
-			if (rolesView || this.#isBrowserView(entry)) {
+			if (rolesView || profilesView || this.#isBrowserView(entry)) {
 				this.#focus = "list";
 			}
 			return;
@@ -1233,6 +1290,17 @@ export class ModelHubComponent implements Component {
 				return;
 			}
 			this.#handleRolesViewInput(data);
+			return;
+		}
+		if (profilesView) {
+			const printable = extractPrintableText(data);
+			if (this.#focus === "scope" && printable !== undefined && printable.trim().length > 0) {
+				this.#setActiveEntry("all");
+				this.#focus = "list";
+				this.#browser.handleInput(data);
+				return;
+			}
+			this.#handleProfilesViewInput(data);
 			return;
 		}
 		if (lockedView) {
@@ -1269,9 +1337,13 @@ export class ModelHubComponent implements Component {
 			this.#closeStrip();
 			return;
 		}
-		if (strip.kind === "roleName") {
+		if (strip.kind === "roleName" || strip.kind === "profileName") {
 			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-				this.#submitRoleName();
+				if (strip.kind === "roleName") {
+					this.#submitRoleName();
+				} else {
+					this.#submitProfileName();
+				}
 				return;
 			}
 			strip.input.handleInput(data);
@@ -1301,8 +1373,8 @@ export class ModelHubComponent implements Component {
 			const entry = this.#entries[index];
 			if (entry && !this.#isHopSkipped(entry)) {
 				// Scope changes keep an active assignment (scoping helps find the
-				// model); landing on the Roles view cancels it.
-				if (entry.kind === "roles") this.#assigning = null;
+				// model); landing on the Roles/Profiles views cancels it.
+				if (entry.kind === "roles" || entry.kind === "profiles") this.#assigning = null;
 				this.#setActiveEntry(entry.id);
 				return;
 			}
@@ -1460,6 +1532,113 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
+	/** Step the profiles cursor by one row, wrapping at the ends. */
+	#stepProfileIndex(from: number, delta: -1 | 1): number {
+		const count = this.#profileRows.length;
+		if (count === 0) return 0;
+		let index = from;
+		for (let i = 0; i < count; i++) {
+			index = (index + delta + count) % count;
+			if (this.#profileRows[index]) return index;
+		}
+		return from;
+	}
+
+	/** Enter/click activation for a Profiles-view row. */
+	#activateProfileRow(row: ProfilesRow): void {
+		switch (row.kind) {
+			case "none":
+				this.#setActiveProfile("");
+				return;
+			case "profile":
+				this.#setActiveProfile(row.name);
+				return;
+			case "newProfile":
+				this.#openProfileNameStrip();
+				return;
+		}
+	}
+
+	/** Activate (or deactivate with "") a model profile and re-sync the hub. */
+	#setActiveProfile(name: string): void {
+		if (name === this.#settings.getActiveModelProfile()) return;
+		this.#settings.setActiveModelProfile(name);
+		this.#refreshAfterMutation();
+	}
+
+	/** Delete a saved profile; the hub re-syncs and the active state clears with it. */
+	#deleteProfile(name: string): void {
+		this.#settings.deleteModelProfile(name);
+		this.#refreshAfterMutation();
+	}
+
+	/** Open the footer name input creating a profile, or renaming `renameFrom`. */
+	#openProfileNameStrip(renameFrom?: string): void {
+		this.#strip = { kind: "profileName", input: new Input(), renameFrom };
+	}
+
+	/** Validate and commit the profile name input (create or rename). */
+	#submitProfileName(): void {
+		const strip = this.#strip;
+		if (strip?.kind !== "profileName") return;
+		const name = strip.input.getValue().trim();
+		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
+		if (strip.renameFrom) {
+			this.#settings.renameModelProfile(strip.renameFrom, name);
+		} else {
+			const profiles = this.#settings.getModelProfiles();
+			if (Object.hasOwn(profiles, name)) return;
+			// A fresh profile starts empty and activates immediately so the
+			// Roles view edits land in it.
+			this.#settings.setModelProfile(name, {});
+			this.#settings.setActiveModelProfile(name);
+		}
+		this.#strip = null;
+		this.#chipRanges = [];
+		this.#refreshAfterMutation();
+	}
+
+	#handleProfilesViewInput(data: string): void {
+		// Scope focus treats the profiles view as a preview: Enter/Space dives
+		// into the rows, everything else is inert (arrows already hop).
+		if (this.#focus === "scope") {
+			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n" || matchesKey(data, "space")) {
+				this.#focus = "list";
+			}
+			return;
+		}
+		if (matchesSelectUp(data)) {
+			this.#profileIndex = this.#stepProfileIndex(this.#profileIndex, -1);
+			return;
+		}
+		if (matchesSelectDown(data)) {
+			this.#profileIndex = this.#stepProfileIndex(this.#profileIndex, 1);
+			return;
+		}
+		const row = this.#profileRows[this.#profileIndex];
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			if (row) this.#activateProfileRow(row);
+			return;
+		}
+		if (matchesKey(data, "backspace") || matchesKey(data, "delete")) {
+			if (row?.kind === "profile") this.#deleteProfile(row.name);
+			return;
+		}
+		const printable = extractPrintableText(data);
+		if (printable === "x") {
+			if (row?.kind === "profile") this.#deleteProfile(row.name);
+			return;
+		}
+		if (printable === "n") {
+			this.#openProfileNameStrip();
+			return;
+		}
+		if (printable === "r") {
+			if (row?.kind === "profile") this.#openProfileNameStrip(row.name);
+			return;
+		}
+	}
+
 	#requestLogin(entry: SidebarEntry): void {
 		if (!entry.providerId) return;
 		if (entry.oauth) {
@@ -1485,7 +1664,7 @@ export class ModelHubComponent implements Component {
 		// Footer strip chips.
 		if (event.row === this.#footerRow && this.#strip) {
 			const strip = this.#strip;
-			if (event.leftClick && strip.kind !== "roleName") {
+			if (event.leftClick && strip.kind !== "roleName" && strip.kind !== "profileName") {
 				for (const range of this.#chipRanges) {
 					if (event.col >= range.start && event.col < range.end) {
 						strip.index = range.index;
@@ -1506,6 +1685,8 @@ export class ModelHubComponent implements Component {
 			} else if (overBody) {
 				if (entry.kind === "roles" && this.#assigning === null) {
 					this.#roleIndex = this.#stepRoleIndex(this.#roleIndex, event.wheel > 0 ? 1 : -1, { wrap: false });
+				} else if (entry.kind === "profiles" && this.#assigning === null) {
+					this.#profileIndex = this.#stepProfileIndex(this.#profileIndex, event.wheel > 0 ? 1 : -1);
 				} else if (this.#isBrowserView(entry)) {
 					this.#browser.routeMouse(event, bodyLine);
 				}
@@ -1519,8 +1700,15 @@ export class ModelHubComponent implements Component {
 				const roleLine = bodyLine - this.#rolesRowStart;
 				this.#roleHover =
 					roleLine >= 0 && roleLine < this.#rolesVisibleCount ? roleLine + this.#roleScrollStart : null;
+			} else if (overBody && entry.kind === "profiles" && this.#assigning === null) {
+				const profileLine = bodyLine - this.#profilesRowStart;
+				this.#profileHover =
+					profileLine >= 0 && profileLine < this.#profilesVisibleCount
+						? profileLine + this.#profileScrollStart
+						: null;
 			} else {
 				this.#roleHover = null;
+				this.#profileHover = null;
 				if (overBody && this.#isBrowserView(entry)) {
 					this.#browser.routeMouse(event, bodyLine);
 				} else {
@@ -1539,10 +1727,10 @@ export class ModelHubComponent implements Component {
 			const clicked = index !== null ? this.#entries[index] : undefined;
 			if (clicked && clicked.kind !== "separator") {
 				const already = clicked.id === this.#activeEntryId;
-				if (clicked.kind === "roles") this.#assigning = null;
+				if (clicked.kind === "roles" || clicked.kind === "profiles") this.#assigning = null;
 				this.#setActiveEntry(clicked.id);
-				// A click on Roles is a deliberate dive into the rows.
-				if (clicked.kind === "roles") this.#focus = "list";
+				// A click on Roles/Profiles is a deliberate dive into the rows.
+				if (clicked.kind === "roles" || clicked.kind === "profiles") this.#focus = "list";
 				if (already && clicked.kind === "provider" && clicked.locked) {
 					this.#requestLogin(clicked);
 				}
@@ -1562,6 +1750,20 @@ export class ModelHubComponent implements Component {
 							this.#activateRolesRow(rowDef);
 						} else {
 							this.#roleIndex = roleLine;
+						}
+					}
+				}
+			} else if (entry.kind === "profiles" && this.#assigning === null) {
+				this.#focus = "list";
+				const listLine = bodyLine - this.#profilesRowStart;
+				if (listLine >= 0 && listLine < this.#profilesVisibleCount) {
+					const profileLine = listLine + this.#profileScrollStart;
+					const rowDef = this.#profileRows[profileLine];
+					if (rowDef) {
+						if (profileLine === this.#profileIndex) {
+							this.#activateProfileRow(rowDef);
+						} else {
+							this.#profileIndex = profileLine;
 						}
 					}
 				}
@@ -1636,8 +1838,9 @@ export class ModelHubComponent implements Component {
 				}
 			}
 			// While searching, entries the hop skips gray out: locked and
-			// zero-match providers, an empty Recent, and the Roles view.
-			const muted = entry.locked || matchCount === 0 || (searching && entry.kind === "roles");
+			// zero-match providers, an empty Recent, and the Roles/Profiles views.
+			const muted =
+				entry.locked || matchCount === 0 || (searching && (entry.kind === "roles" || entry.kind === "profiles"));
 			// The sidebar's active entry is state, not a cursor: accent label
 			// plus a cursor glyph while the sidebar owns the arrows. The band
 			// stays in the body pane so the two never look alike.
@@ -1646,6 +1849,8 @@ export class ModelHubComponent implements Component {
 			let icon: string;
 			if (entry.kind === "recent") {
 				icon = theme.icon.time;
+			} else if (entry.kind === "profiles") {
+				icon = theme.icon.package;
 			} else if (entry.kind === "roles") {
 				icon = theme.icon.extensionSkill;
 			} else if (entry.kind === "all") {
@@ -1716,6 +1921,13 @@ export class ModelHubComponent implements Component {
 			case "roles":
 				text = "Model roles — f adds a retry fallback, cleared roles fall back to auto-selection";
 				break;
+			case "profiles": {
+				const activeProfile = this.#settings.getActiveModelProfile();
+				text = activeProfile
+					? `Model profiles — active: ${activeProfile} · role edits go to the profile · only models are affected`
+					: "Model profiles — pick a named role-assignment bundle; only models are affected";
+				break;
+			}
 			case "provider":
 				if (entry.locked) {
 					text = `${entry.label} · not configured`;
@@ -1891,6 +2103,94 @@ export class ModelHubComponent implements Component {
 		return lines;
 	}
 
+	/** Scroll `#profileScrollStart` just enough to keep `#profileIndex` inside a window of `viewHeight` rows. */
+	#ensureProfileVisible(viewHeight: number, total: number): number {
+		if (viewHeight <= 0) return 0;
+		let start = this.#profileScrollStart;
+		if (this.#profileIndex < start) start = this.#profileIndex;
+		else if (this.#profileIndex >= start + viewHeight) start = this.#profileIndex - viewHeight + 1;
+		return Math.max(0, Math.min(start, Math.max(0, total - viewHeight)));
+	}
+
+	#renderProfilesView(width: number, rows: number): string[] {
+		const lines: string[] = [];
+		lines.push("");
+		this.#profilesRowStart = lines.length;
+
+		const activeProfile = this.#settings.getActiveModelProfile();
+		const profiles = this.#settings.getModelProfiles();
+		const listFocused = this.#focus === "list";
+		const total = this.#profileRows.length;
+		const capacity = Math.max(0, rows - 2 - this.#profilesRowStart);
+		const overflow = total > capacity;
+		const viewHeight = overflow ? Math.max(0, capacity - 1) : capacity;
+		this.#profileScrollStart = this.#ensureProfileVisible(viewHeight, total);
+		const endIndex = Math.min(this.#profileScrollStart + viewHeight, total);
+		this.#profilesVisibleCount = Math.max(0, endIndex - this.#profileScrollStart);
+		for (let i = this.#profileScrollStart; i < endIndex; i++) {
+			const rowDef = this.#profileRows[i];
+			if (!rowDef) continue;
+			const selected = i === this.#profileIndex;
+			const hovered = i === this.#profileHover;
+			const cursor = selected && listFocused ? theme.fg("accent", theme.nav.cursor) : " ";
+
+			if (rowDef.kind === "newProfile") {
+				const label = "+ New profile…";
+				let line = ` ${cursor} ${theme.fg(selected ? "accent" : "dim", label)}`;
+				line = this.#finishRolesRow(line, width, hovered);
+				lines.push(line);
+				continue;
+			}
+
+			const name = rowDef.kind === "none" ? "None (base roles)" : rowDef.name;
+			const isActive = rowDef.kind === "none" ? !activeProfile : activeProfile === rowDef.name;
+			if (rowDef.kind === "none") {
+				const dot = isActive ? theme.fg("accent", theme.status.enabled) : theme.fg("dim", theme.status.shadowed);
+				const label = isActive ? theme.bold(theme.fg("accent", name)) : theme.fg("dim", name);
+				let line = ` ${cursor} ${dot} ${label}`;
+				line = this.#finishRolesRow(line, width, hovered);
+				lines.push(line);
+				continue;
+			}
+
+			const dot = isActive ? theme.fg("accent", theme.status.enabled) : theme.fg("dim", theme.status.shadowed);
+			const label = isActive ? theme.bold(theme.fg("accent", name)) : name;
+			const roleCount = Object.keys(profiles[name] ?? {}).length;
+			const annotation = isActive
+				? theme.fg("accent", "active")
+				: theme.fg("dim", `${roleCount} role${roleCount === 1 ? "" : "s"}`);
+			let line = ` ${cursor} ${dot} ${label}`;
+			const lineWidth = visibleWidth(line);
+			const annWidth = visibleWidth(annotation);
+			if (lineWidth + annWidth + 2 <= width) {
+				line = `${line}${" ".repeat(width - lineWidth - annWidth - 1)}${annotation}`;
+			}
+			line = this.#finishRolesRow(line, width, hovered);
+			lines.push(line);
+		}
+
+		if (overflow) {
+			const hiddenAbove = this.#profileScrollStart;
+			const hiddenBelow = total - endIndex;
+			const parts: string[] = [];
+			if (hiddenAbove > 0) parts.push(`↑ ${hiddenAbove} more`);
+			if (hiddenBelow > 0) parts.push(`↓ ${hiddenBelow} more`);
+			lines.push(truncateToWidth(theme.fg("dim", `   ${parts.join("   ")}`), width));
+		}
+
+		while (lines.length < rows - 1) lines.push("");
+		if (rows >= 2) {
+			lines[rows - 1] = truncateToWidth(
+				theme.fg(
+					"dim",
+					`  ${activeProfile ? `Active: ${activeProfile}` : "No profile — base role config applies"}`,
+				),
+				width,
+			);
+		}
+		return lines;
+	}
+
 	#renderLockedView(entry: SidebarEntry, width: number, rows: number): string[] {
 		const lines: string[] = [];
 		this.#lockedLoginLine = null;
@@ -1933,6 +2233,9 @@ export class ModelHubComponent implements Component {
 			if (strip.kind === "roleName") {
 				return "Enter create + pick model · Esc cancel";
 			}
+			if (strip.kind === "profileName") {
+				return strip.renameFrom ? "Enter rename profile · Esc cancel" : "Enter create profile · Esc cancel";
+			}
 			if (strip.kind === "role") return "←/→ choose · Enter assign/clear · Esc cancel";
 			if (strip.kind === "scope") return "←/→ save scope · Enter choose · Esc cancel";
 			return "←/→ thinking level · Enter apply · Esc keep";
@@ -1964,6 +2267,16 @@ export class ModelHubComponent implements Component {
 			}
 			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new";
 		}
+		if (entry.kind === "profiles") {
+			if (this.#focus !== "list") {
+				return "↑/↓ providers · → profiles · Esc close";
+			}
+			const row = this.#profileRows[this.#profileIndex];
+			if (row?.kind === "newProfile") {
+				return "↑/↓ profiles · Enter new profile · ← providers";
+			}
+			return "↑/↓ profiles · Enter apply · n new · r rename · x delete · ← providers";
+		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
 		}
@@ -1980,9 +2293,15 @@ export class ModelHubComponent implements Component {
 			return truncateToWidth(theme.fg("dim", this.#footerHint()), width);
 		}
 
-		if (strip.kind === "roleName") {
-			const label = theme.fg("accent", "New role name:");
-			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth("New role name:") - 24));
+		if (strip.kind === "roleName" || strip.kind === "profileName") {
+			const labelText =
+				strip.kind === "roleName"
+					? "New role name:"
+					: strip.renameFrom
+						? "Rename profile to:"
+						: "New profile name:";
+			const label = theme.fg("accent", labelText);
+			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth(labelText) - 24));
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
 			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
 		}
@@ -2053,6 +2372,8 @@ export class ModelHubComponent implements Component {
 		const bodyLines: string[] = [this.#statusRow(bodyWidth)];
 		if (entry.kind === "roles" && this.#assigning === null) {
 			bodyLines.push(...this.#renderRolesView(bodyWidth, contentRows - 1));
+		} else if (entry.kind === "profiles" && this.#assigning === null) {
+			bodyLines.push(...this.#renderProfilesView(bodyWidth, contentRows - 1));
 		} else if (entry.kind === "provider" && entry.locked && this.#assigning === null) {
 			bodyLines.push(...this.#renderLockedView(entry, bodyWidth, contentRows - 1));
 		} else {

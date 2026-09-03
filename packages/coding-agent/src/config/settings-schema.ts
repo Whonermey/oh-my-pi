@@ -399,6 +399,7 @@ export interface ModelTagsSettings {
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
+const EMPTY_MODEL_PROFILES_RECORD: Record<string, Record<string, string>> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
@@ -670,6 +671,12 @@ export const SETTINGS_SCHEMA = {
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
+
+	/** Named bundles of model-role assignments; selecting one makes it the effective role config. */
+	modelProfiles: { type: "record", default: EMPTY_MODEL_PROFILES_RECORD },
+
+	/** Name of the active model profile; empty means no profile (base role config applies). */
+	activeModelProfile: { type: "string", default: "" },
 
 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
 
@@ -6340,9 +6347,8 @@ export interface GroupTypeMap {
 	statusLine: StatusLineSettings;
 	thinkingBudgets: ThinkingBudgetsSettings;
 	stt: SttSettings;
-	modelRoles: Record<string, string>;
-	modelTags: ModelTagsSettings;
-	cycleOrder: string[];
+	modelProfiles: Record<string, Record<string, string>>;
+	activeModelProfile: string;
 	shellMinimizer: ShellMinimizerSettings;
 	codexResets: CodexResetsSettings;
 	gc: GcSettings;

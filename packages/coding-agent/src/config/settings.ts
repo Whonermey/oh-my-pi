@@ -1185,6 +1185,14 @@ export class Settings {
 	 * stale skip in place.
 	 */
 	setModelRole(role: ModelRole | string, modelId: string | undefined): void {
+		// With an active profile, persisted role edits belong to the profile:
+		// it is the effective role config, so writing the base layer would be
+		// invisible until the profile is deactivated.
+		const activeProfile = this.getActiveModelProfile();
+		if (activeProfile) {
+			this.setProfileRole(activeProfile, role, modelId);
+			return;
+		}
 		const prev = this.get("modelRoles");
 		const current = this.#modelRolesFromLayer(this.#global);
 		this.#captureGlobalMutation(role, this.#modifiedGlobalModelRoleMutations, current[role]);
@@ -1222,10 +1230,16 @@ export class Settings {
 		if (!this.#savedRuntimeModelRoleOverrides.has(role)) return false;
 		return !!this.getProjectModelRole(role);
 	}
+
 	/**
 	 * Set a model role in the current project's settings layer.
 	 */
 	setProjectModelRole(role: ModelRole | string, modelId: string): void {
+		const activeProfile = this.getActiveModelProfile();
+		if (activeProfile) {
+			this.setProfileRole(activeProfile, role, modelId);
+			return;
+		}
 		this.#setProjectModelRoleValue(role, modelId);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, modelId);
@@ -1234,15 +1248,28 @@ export class Settings {
 	 * Clear a model role from the current project's settings layer.
 	 */
 	clearProjectModelRole(role: ModelRole | string): void {
+		const activeProfile = this.getActiveModelProfile();
+		if (activeProfile) {
+			this.setProfileRole(activeProfile, role, undefined);
+			return;
+		}
 		this.#setProjectModelRoleValue(role, null);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, undefined);
 	}
-
 	/**
 	 * Get a model role (helper for modelRoles record).
+	 *
+	 * Precedence: runtime override → active model profile → persisted config
+	 * layers (global → project → overlay). Runtime overrides (CLI --model,
+	 * session-only picks, cycling) stay authoritative so a profile can never
+	 * shadow an explicit temporary selection.
 	 */
 	getModelRole(role: ModelRole | string): string | undefined {
+		const runtime = this.#modelRolesFromLayer(this.#overrides);
+		if (Object.hasOwn(runtime, role)) return runtime[role];
+		const profile = this.#activeProfileRoles();
+		if (profile && Object.hasOwn(profile, role)) return profile[role];
 		const roles: unknown = this.get("modelRoles");
 		if (!isRecord(roles)) return undefined;
 		return modelRoleValueFromUnknown(roles[role]);
@@ -1293,20 +1320,141 @@ export class Settings {
 
 	/**
 	 * Get all model roles (helper for modelRoles record).
+	 *
+	 * Effective record: persisted config layers → active model profile →
+	 * runtime overrides, with later sources winning per-role (same precedence
+	 * as {@link getModelRole}).
 	 */
 	getModelRoles(): ReadOnlyDict<string> {
-		const roles: unknown = this.get("modelRoles");
-		if (!isRecord(roles)) return {};
-
 		const normalized: Record<string, string> = {};
+		const absorb = (source: Record<string, string>): void => {
+			for (const role in source) {
+				if (!Object.hasOwn(source, role)) continue;
+				const modelId = modelRoleValueFromUnknown(source[role]);
+				if (modelId !== undefined) {
+					normalized[role] = modelId;
+				}
+			}
+		};
+		absorb(this.#configuredModelRoles());
+		absorb(this.#activeProfileRoles() ?? {});
+		absorb(this.#modelRolesFromLayer(this.#overrides));
+		return normalized;
+	}
+
+	/** Model roles from the persisted config layers (global → project → overlay), excluding runtime overrides. */
+	#configuredModelRoles(): Record<string, string> {
+		let config = this.#deepMerge({}, this.#global);
+		config = this.#deepMerge(config, this.#projectSettingsForMerge());
+		config = this.#deepMerge(config, this.#configOverlay);
+		return this.#modelRolesFromLayer(config);
+	}
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// Model profiles
+	// ─────────────────────────────────────────────────────────────────────────
+
+	/** Raw `modelProfiles` record with malformed entries dropped. */
+	getModelProfiles(): Record<string, Record<string, string>> {
+		const profiles: unknown = this.get("modelProfiles");
+		if (!isRecord(profiles)) return {};
+		const sanitized: Record<string, Record<string, string>> = {};
+		for (const name in profiles) {
+			if (!Object.hasOwn(profiles, name) || typeof name !== "string") continue;
+			const roles = (profiles as Record<string, unknown>)[name];
+			if (!isRecord(roles)) continue;
+			const cleanRoles: Record<string, string> = {};
+			for (const role in roles) {
+				if (!Object.hasOwn(roles, role)) continue;
+				const value = modelRoleValueFromUnknown((roles as Record<string, unknown>)[role]);
+				if (value !== undefined) cleanRoles[role] = value;
+			}
+			sanitized[name] = cleanRoles;
+		}
+		return sanitized;
+	}
+
+	/** Roles of the active model profile, or null when none is active. */
+	#activeProfileRoles(): Record<string, string> | null {
+		const name = this.getActiveModelProfile();
+		if (!name) return null;
+		const profiles = this.getModelProfiles();
+		return profiles[name] ?? null;
+	}
+
+	/** Name of the active model profile ("" = none). */
+	getActiveModelProfile(): string {
+		const value = this.get("activeModelProfile");
+		return typeof value === "string" ? value : "";
+	}
+
+	/**
+	 * Activate a saved profile ("" deactivates — base role config applies).
+	 * Fires the model-roles signal so live sessions re-resolve role models.
+	 */
+	setActiveModelProfile(name: string): void {
+		const prev = this.getActiveModelProfile();
+		if (name === prev) return;
+		if (name && !Object.hasOwn(this.getModelProfiles(), name)) return;
+		this.set("activeModelProfile", name);
+		if (prev !== this.getActiveModelProfile()) {
+			modelRolesSignal.fire();
+		}
+	}
+
+	/** Save (upsert) a whole profile's role assignments. */
+	setModelProfile(name: string, roles: Record<string, string>): void {
+		if (!name) return;
+		const profiles = this.getModelProfiles();
+		const clean: Record<string, string> = {};
 		for (const role in roles) {
 			if (!Object.hasOwn(roles, role)) continue;
-			const modelId = modelRoleValueFromUnknown(roles[role]);
-			if (modelId !== undefined) {
-				normalized[role] = modelId;
-			}
+			const value = modelRoleValueFromUnknown(roles[role]);
+			if (value !== undefined) clean[role] = value;
 		}
-		return normalized;
+		profiles[name] = clean;
+		this.set("modelProfiles", profiles);
+		modelRolesSignal.fire();
+	}
+
+	/** Delete a saved profile; deactivates it when it was the active one. */
+	deleteModelProfile(name: string): void {
+		const profiles = this.getModelProfiles();
+		if (!Object.hasOwn(profiles, name)) return;
+		delete profiles[name];
+		this.set("modelProfiles", profiles);
+		if (this.getActiveModelProfile() === name) {
+			this.set("activeModelProfile", "");
+		}
+		modelRolesSignal.fire();
+	}
+
+	/** Rename a saved profile, keeping it active when it was active. */
+	renameModelProfile(oldName: string, newName: string): void {
+		if (!oldName || !newName || oldName === newName) return;
+		const profiles = this.getModelProfiles();
+		if (!Object.hasOwn(profiles, oldName) || Object.hasOwn(profiles, newName)) return;
+		profiles[newName] = profiles[oldName]!;
+		delete profiles[oldName];
+		this.set("modelProfiles", profiles);
+		if (this.getActiveModelProfile() === oldName) {
+			this.set("activeModelProfile", newName);
+		}
+		modelRolesSignal.fire();
+	}
+
+	/** Set or clear (`undefined`) one role inside a saved profile. */
+	setProfileRole(name: string, role: ModelRole | string, modelId: string | undefined): void {
+		const profiles = this.getModelProfiles();
+		const profileRoles = profiles[name] ?? {};
+		profiles[name] = profileRoles;
+		if (modelId === undefined) {
+			delete profileRoles[role];
+		} else {
+			profileRoles[role] = modelId;
+		}
+		this.set("modelProfiles", profiles);
+		modelRolesSignal.fire();
 	}
 
 	/*

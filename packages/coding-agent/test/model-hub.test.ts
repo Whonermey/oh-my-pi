@@ -262,6 +262,70 @@ describe("ModelHub", () => {
 		});
 	});
 
+	describe("profiles view", () => {
+		test("renders saved profiles above the no-profile row and the new-profile row", () => {
+			const model = makeModel("test", "worker");
+			const settings = Settings.isolated({
+				modelProfiles: {
+					work: { default: `${model.provider}/${model.id}` },
+					research: { smol: `${model.provider}/${model.id}:low` },
+				},
+			});
+			const { hub } = createHub({ models: [model], scoped: true, settings });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles
+			hub.handleInput(UP); // Roles → Profiles
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("Profiles");
+			expect(rendered).toContain("None (base roles)");
+			expect(rendered).toContain("work");
+			expect(rendered).toContain("research");
+			expect(rendered).toContain("+ New profile");
+		});
+
+		test("activating a profile on Enter persists it; runtime overrides still win", () => {
+			const model = makeModel("test", "worker");
+			const settings = Settings.isolated({
+				modelRoles: { default: `${model.provider}/${model.id}` },
+				modelProfiles: { work: { default: `${model.provider}/${model.id}:low` } },
+			});
+			const { hub } = createHub({ models: [model], scoped: true, settings });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles
+			hub.handleInput(UP); // Roles → Profiles
+			hub.handleInput("\n"); // dive into the rows
+			hub.handleInput(DOWN); // None → work
+			hub.handleInput("\n"); // activate work
+
+			expect(settings.getActiveModelProfile()).toBe("work");
+			expect(settings.getModelProfiles().work?.default).toBe(`${model.provider}/${model.id}:low`);
+			// The isolated config lives in the runtime layer, which beats the profile.
+			expect(settings.getModelRole("default")).toBe(`${model.provider}/${model.id}`);
+		});
+
+		test("the none row deactivates the active profile", () => {
+			const model = makeModel("test", "worker");
+			const settings = Settings.isolated({
+				modelProfiles: { work: { default: `${model.provider}/${model.id}` } },
+			});
+			const { hub } = createHub({ models: [model], scoped: true, settings });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles
+			hub.handleInput(UP); // Roles → Profiles
+			hub.handleInput("\n"); // dive into the rows
+			hub.handleInput(DOWN); // None → work
+			hub.handleInput("\n"); // activate work
+			expect(settings.getActiveModelProfile()).toBe("work");
+
+			hub.handleInput(UP); // work → None
+			hub.handleInput("\n"); // deactivate
+			expect(settings.getActiveModelProfile()).toBe("");
+		});
+	});
+
 	describe("hop focus stability", () => {
 		test("hopping onto Roles keeps provider navigation instead of capturing the arrows", () => {
 			const model = makeModel("prov-a", "model-a");

@@ -3,6 +3,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
@@ -943,10 +944,48 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onAssign: async (model, role, thinkingLevel, selector, scope?: ModelRoleSelectionScope) => {
+					const selectorValue = selector ?? `${model.provider}/${model.id}`;
+					const activeProfile = this.ctx.settings.getActiveModelProfile();
+					if (activeProfile) {
+						// Profiles bundle role→model assignments and nothing else:
+						// with one active, assignments persist into the profile.
+						// The default role also switches the live session; the
+						// write lands in the profile via the routed setModelRole.
+						try {
+							if (role === "default") {
+								const isAuto = thinkingLevel === AUTO_THINKING;
+								const concreteThinking = isAuto || thinkingLevel === undefined ? undefined : thinkingLevel;
+								const { switched } = await this.ctx.session.setModel(model, role, {
+									selector,
+									thinkingLevel: isAuto ? ThinkingLevel.Inherit : concreteThinking,
+									persist: true,
+								});
+								if (!switched) return;
+								if (isAuto) {
+									this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
+								} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
+									this.ctx.session.setThinkingLevel(concreteThinking);
+								}
+								this.ctx.statusLine.invalidate();
+								this.ctx.updateEditorBorderColor();
+								this.ctx.showStatus(`Default model (profile ${activeProfile}): ${selector ?? model.id}`);
+							} else {
+								this.ctx.settings.setModelRole(role, formatModelSelectorValue(selectorValue, thinkingLevel));
+								const roleInfo = getRoleInfo(role, settings);
+								this.ctx.showStatus(
+									`${roleInfo?.tag ?? roleInfo?.name ?? role} model (profile ${activeProfile}): ${selector ?? model.id}`,
+								);
+							}
+						} catch (error) {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+						} finally {
+							hub?.refreshAfterExternalMutation();
+						}
+						return;
+					}
 					const releaseDefaultMutation = role === "default" ? await this.#acquireDefaultRoleMutation() : undefined;
 					const configuredStorage = this.ctx.settings.get("modelRoleStorage");
 					const targetScope = configuredStorage === "project" ? (scope ?? "project") : "global";
-					const selectorValue = selector ?? `${model.provider}/${model.id}`;
 					const scopeLabel =
 						configuredStorage === "project" ? `${targetScope === "project" ? "Project" : "Global"} ` : "";
 					const defaultStatusLabel = configuredStorage === "project" ? `${scopeLabel}default` : "Default";
@@ -1027,6 +1066,58 @@ export class SelectorController {
 					}
 				},
 				onUnassign: async (role, scope?: ModelRoleSelectionScope) => {
+					const activeProfile = this.ctx.settings.getActiveModelProfile();
+					if (activeProfile) {
+						try {
+							// Roles not owned by the profile come from the base
+							// config, which stays read-only while a profile is
+							// active — deactivate the profile to edit them.
+							const profileRoles = this.ctx.settings.getModelProfiles()[activeProfile] ?? {};
+							if (!Object.hasOwn(profileRoles, role)) {
+								this.ctx.showStatus(
+									`${role} is not set in profile ${activeProfile} — base config supplies it; switch to "None (base roles)" to edit base roles`,
+								);
+								hub?.refreshAfterExternalMutation();
+								return;
+							}
+							const previousEffectiveRoleValue =
+								role === "default" ? this.ctx.settings.getModelRole("default") : undefined;
+							// Routed by Settings: with a profile active the role is
+							// removed from the profile record, not the base layers.
+							this.ctx.settings.setModelRole(role, undefined);
+							const roleInfo = getRoleInfo(role, settings);
+							this.ctx.showStatus(
+								`${roleInfo?.tag ?? roleInfo?.name ?? role} role cleared from profile ${activeProfile} — base config applies`,
+							);
+							// Clearing the profile's default exposes the base/runtime
+							// value: switch the live session when it actually changed.
+							if (role === "default") {
+								const fallbackRoleValue = this.ctx.settings.getModelRole("default");
+								if (fallbackRoleValue && fallbackRoleValue !== previousEffectiveRoleValue) {
+									const scopedModels = this.ctx.session.scopedModels.map(sm => sm.model);
+									const availableModels =
+										scopedModels.length > 0 ? scopedModels : this.ctx.session.getAvailableModels();
+									const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
+										settings: this.ctx.settings,
+									});
+									if (resolved.model && !modelsAreEqual(resolved.model, this.ctx.session.model)) {
+										await this.ctx.session.setModel(resolved.model, "default", {
+											selector: `${resolved.model.provider}/${resolved.model.id}`,
+											thinkingLevel: ThinkingLevel.Inherit,
+											persist: false,
+										});
+										this.ctx.statusLine.invalidate();
+										this.ctx.updateEditorBorderColor();
+									}
+								}
+							}
+						} catch (error) {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+						} finally {
+							hub?.refreshAfterExternalMutation();
+						}
+						return;
+					}
 					const releaseDefaultMutation = role === "default" ? await this.#acquireDefaultRoleMutation() : undefined;
 					const configuredStorage = this.ctx.settings.get("modelRoleStorage");
 					const targetScope = configuredStorage === "project" ? (scope ?? "project") : "global";
