@@ -5,6 +5,7 @@ import {
 	buildArgumentCompletions,
 	buildDirectoryArgumentCompletions,
 	buildMcpArgumentCompletions,
+	buildModelSelectorCompletions,
 	buildStaticInlineHint,
 	buildSubcommandInlineHint,
 } from "./builtin-completions";
@@ -94,6 +95,9 @@ function materializeTuiBuiltinSlashCommand(
 			})),
 			{ name: "none", description: "Deactivate the active profile (base roles)" },
 		]);
+		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+	} else if (cmd.name === "switch" && runtime) {
+		materialized.getArgumentCompletions = buildModelSelectorCompletions(runtime);
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	} else if (cmd.inlineHint) {
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
